@@ -13,6 +13,7 @@
   {:provided
    {:dependencies
     [[org.clojure/clojure "1.9.0"]
+     [com.apa512/rethinkdb "1.0.0-SNAPSHOT"]
      [metabase-core "1.0.0-SNAPSHOT"]]}
 
    :uberjar
