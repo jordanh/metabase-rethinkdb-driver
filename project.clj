@@ -14,6 +14,7 @@
    {:dependencies
     [[org.clojure/clojure "1.9.0"]
      [com.apa512/rethinkdb "1.0.0-SNAPSHOT"]
+;;     [com.apa512/rethinkdb "0.15.26"]
      [metabase-core "1.0.0-SNAPSHOT"]]}
 
    :uberjar
