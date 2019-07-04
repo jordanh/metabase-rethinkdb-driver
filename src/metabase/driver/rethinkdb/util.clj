@@ -3,13 +3,24 @@
             [metabase
               [util :as u]]))
 
-(defn details-to-rethinkdb-connection-params
-  [{:keys [host dbname port]}]
-    {:host        host
-     :db          dbname
-     :port        port
-    })
+; (import com.rethinkdb.RethinkDB)
+; (def r com.rethinkdb.RethinkDB/r)
 
-(defn with-rethinkdb-connection
-  [driver database]
-  true)
+; (defn- details-to-rethinkdb-connection-params
+;   [{:keys [host dbname port]}]
+;     {:host        host
+;      :db          dbname
+;      :port        port
+;     })
+
+
+; (defn connect
+;   [details]
+;   (let  [connect-params (details-to-rethinkdb-connection-params details)
+;          {:keys [dbname host port]} connect-params]
+;     (-> (.connection r)
+;         (cond->
+;           (not-empty dbname) (.dbname dbname)
+;           (not-empty host) (.hostname host)
+;           (not-empty port) (.port port))
+;         .connect)))
