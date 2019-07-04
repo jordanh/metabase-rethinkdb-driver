@@ -4,7 +4,7 @@
   :dependencies
   [[org.clojure/core.logic "0.8.11"
     :exclusions [org.clojure/clojure]]
-   [com.rethinkdb/rethinkdb-driver "2.3.3"]]
+   [com.apa512/rethinkdb "1.0.0-SNAPSHOT"]]
 
   :jvm-opts
   ["-XX:+IgnoreUnrecognizedVMOptions"
@@ -14,8 +14,6 @@
   {:provided
    {:dependencies
     [[org.clojure/clojure "1.9.0"]
-;;     [com.apa512/rethinkdb "1.0.0-SNAPSHOT"]
-;;     [com.apa512/rethinkdb "0.15.26"]
      [metabase-core "1.0.0-SNAPSHOT"]]}
 
    :uberjar
