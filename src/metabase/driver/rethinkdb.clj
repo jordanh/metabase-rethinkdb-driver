@@ -52,23 +52,14 @@
                 (sequential? j))
         :type/SerializedJSON))))
 
-; (defn- update-field-attrs [field-value field-def]
-;   (-> field-def
-;       (update :count u/safe-inc)
-;       (update :len #(if (string? field-value)
-;                       (+ (or % 0) (count field-value))
-;                       %))
-;       (update :types (fn [types]
-;                        (update types (type field-value) u/safe-inc)))
-;       (update :special-types (fn [special-types]
-;                                (if-let [st (val->special-type field-value)]
-;                                  (update special-types st u/safe-inc)
-;                                  special-types)))
-;       (update :nested-fields (fn [nested-fields]
-;                                (if (map? field-value)
-;                                  (find-nested-fields field-value nested-fields)
-;                                  nested-fields)))))
+(declare update-field-attrs)
 
+(defn- find-nested-fields [field-value nested-fields]
+  (loop [[k & more-keys] (keys field-value)
+         fields nested-fields]
+    (if-not k
+      fields
+      (recur more-keys (update fields k (partial update-field-attrs (k field-value)))))))
 
 (defn- update-field-attrs [field-value field-def]
   (-> field-def
@@ -81,7 +72,11 @@
       (update :special-types (fn [special-types]
                                (if-let [st (val->special-type field-value)]
                                  (update special-types st u/safe-inc)
-                                 special-types)))))
+                                 special-types)))
+      (update :nested-fields (fn [nested-fields]
+                               (if (map? field-value)
+                                 (find-nested-fields field-value nested-fields)
+                                 nested-fields)))))
 ;; TODO: nested field support
 
 (defn- table-sample-column-info
