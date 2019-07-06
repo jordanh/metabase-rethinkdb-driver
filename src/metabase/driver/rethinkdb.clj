@@ -5,6 +5,7 @@
             [clojure.tools.logging :as log]
             [metabase
               [util :as u]]
+            [metabase.driver.common :as driver.common]
             [metabase.db.metadata-queries :as metadata-queries]
             [metabase.driver :as driver]
             [metabase.query-processor.store :as qp.store]
@@ -99,17 +100,38 @@
             (recur more-keys (update fields k (partial update-field-attrs (k row)))))))
     {} sample-rows)))
 
+(s/defn ^:private ^Class most-common-object-type :- (s/maybe Class)
+  "Given a sequence of tuples like [Class <number-of-occurances>] return the Class with the highest number of
+  occurances. The basic idea here is to take a sample of values for a Field and then determine the most common type
+  for its values, and use that as the Metabase base type. For example if we have a Field called `zip_code` and it's a
+  number 90% of the time and a string the other 10%, we'll just call it a `:type/Number`."
+  [field-types :- [(s/pair (s/maybe Class) "Class", s/Int "Int")]]
+  (->> field-types
+       (sort-by second)
+       last
+       first))
+
+(defn- describe-table-field [field-kw field-info]
+  (let [most-common-object-type (most-common-object-type (vec (:types field-info)))]
+    (cond-> {:name          (name field-kw)
+             :database-type (some-> most-common-object-type .getName)
+             :base-type     (driver.common/class->base-type most-common-object-type)}
+      (= :_id field-kw)           (assoc :pk? true)
+      (:special-types field-info) (assoc :special-type (->> (vec (:special-types field-info))
+                                                            (filter #(some? (first %)))
+                                                            (sort-by second)
+                                                            last
+                                                            first))
+      (:nested-fields field-info) (assoc :nested-fields (set (for [field (keys (:nested-fields field-info))]
+                                                               (describe-table-field field (field (:nested-fields field-info)))))))))
+
 (defmethod driver/describe-table :rethinkdb [_ database table]
   (log/info (format "driver/describe-table: database=%s table=%s" database table))
   (let [clj-rethinkdb-params (*-to-clj-rethinkdb-params database)]
     (with-open [conn (apply r/connect (mapcat identity clj-rethinkdb-params))]
       (let [column-info (table-sample-column-info conn table)]
-        (log/info (format "driver/describe-table: column-info=%s" column-info))))))
-
-; (defmethod driver/describe-table :mongo [_ database table]
-;   (with-mongo-connection [^com.mongodb.DB conn database]
-;     (let [column-info (table-sample-column-info conn table)]
-;       {:schema nil
-;        :name   (:name table)
-;        :fields (set (for [[field info] column-info]
-;                       (describe-table-field field info)))})))
+        (log/info (format "driver/describe-table: column-info=%s" column-info))
+        {:schema nil
+         :name   (:name table)
+         :fields (set (for [[field info] column-info]
+                        (describe-table-field field info)))}))))
