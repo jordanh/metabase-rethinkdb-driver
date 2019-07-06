@@ -28,7 +28,6 @@
 
 (defmethod driver/describe-database :rethinkdb
   [driver database]
-  (log/info (format "driver/describe-database: driver=%s database=%s" driver database))
   (let [clj-rethinkdb-params (*-to-clj-rethinkdb-params database)]
     (with-open [conn (apply r/connect (mapcat identity clj-rethinkdb-params))]
       {:tables
@@ -126,11 +125,9 @@
                                                                (describe-table-field field (field (:nested-fields field-info)))))))))
 
 (defmethod driver/describe-table :rethinkdb [_ database table]
-  (log/info (format "driver/describe-table: database=%s table=%s" database table))
   (let [clj-rethinkdb-params (*-to-clj-rethinkdb-params database)]
     (with-open [conn (apply r/connect (mapcat identity clj-rethinkdb-params))]
       (let [column-info (table-sample-column-info conn table)]
-        (log/info (format "driver/describe-table: column-info=%s" column-info))
         {:schema nil
          :name   (:name table)
          :fields (set (for [[field info] column-info]
