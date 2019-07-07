@@ -10,11 +10,11 @@
 
 ;; See: https://github.com/metabase/metabase/wiki/(Incomplete)-MBQL-Reference
 
-(defn- handle-table [{source-table-id :source-table} query-ctx]
+(defn- handle-table [query {source-table-id :source-table}]
   (log/info (format "driver.query-processor/handle-table: source-table-id=%s" source-table-id))
   (if-not source-table-id
-    query-ctx
-    (update query-ctx :query conj (r/table (qp.store/table source-table-id)))))
+    query
+    (r/table query (qp.store/table source-table-id))))
 
 (defn- generate-rethinkdb-query
   [inner-query]
@@ -22,11 +22,8 @@
   (let [inner-query (update inner-query :aggregation 
                       (partial mbql.u/pre-alias-and-uniquify-aggregations
                                annotate/aggregation-name))]
-    (reduce (fn [query-ctx f]
-              (f inner-query query-ctx))
-            {:query {}}
-            [handle-table]
-    )))
+    {:query (-> {}
+                (handle-table inner-query))}))
 
 (defn mbql->native
   "Process and run an MBQL query."
