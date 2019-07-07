@@ -8,8 +8,8 @@
             [metabase.driver.common :as driver.common]
             [metabase.db.metadata-queries :as metadata-queries]
             [metabase.driver :as driver]
-            [metabase.query-processor.store :as qp.store]
             [metabase.driver.rethinkdb
+              [query-processor :as qp]
               [util :refer [*-to-clj-rethinkdb-params]]]
             [schema.core :as s]
             [rethinkdb.query :as r]))
@@ -21,13 +21,14 @@
 
 (defmethod driver/can-connect? :rethinkdb
   [_ details]
-  (log/info (format "driver/can-connect? details: %s" details))
+  (log/info (format "driver/can-connect?: details=%s" details))
   (let [clj-rethinkdb-params (*-to-clj-rethinkdb-params details)]
     (with-open [conn (apply r/connect (mapcat identity clj-rethinkdb-params))]
       (-> (r/now) (r/gt 0) (r/run conn)))))
 
 (defmethod driver/describe-database :rethinkdb
   [driver database]
+  (log/info (format "driver/describe-database: database=%s" database))
   (let [clj-rethinkdb-params (*-to-clj-rethinkdb-params database)]
     (with-open [conn (apply r/connect (mapcat identity clj-rethinkdb-params))]
       {:tables
@@ -132,3 +133,11 @@
          :name   (:name table)
          :fields (set (for [[field info] column-info]
                         (describe-table-field field info)))}))))
+
+(defmethod driver/mbql->native :rethinkdb [_ query]
+  (log/info (format "driver/mbql->native: query=%s" query))
+  (qp/mbql->native query))
+
+(defmethod driver/execute-query :rethinkdb [_ query]
+  (log/info (format "driver/execute-query: query=%s" query))
+  (qp/execute-query query))
