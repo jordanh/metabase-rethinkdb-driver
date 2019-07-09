@@ -16,14 +16,35 @@
     query
     (r/table query (qp.store/table source-table-id))))
 
+(defn- handle-fields [query {:keys [fields]}]
+  (log/info (format "driver.query-processor/handle-fields: fields=%s" fields))
+  (let [field-names (map #(-> (mbql.u/field-clause->id-or-literal %)
+                              (qp.store/field)
+                              (:name))
+                         fields)]
+    ;; TODO: this will probably need to be enhanced to fully support nested fields
+    (-> query
+        (r/with-fields field-names)
+        (r/map (r/fn [row]
+                 (r/map field-names (r/fn [col] (r/get-field row col))))))))
+
+(defn- handle-limit [query {:keys [limit]}]
+  (log/info (format "driver.query-processor/handle-limit: limit=%d" limit))
+  (if-not limit
+    query
+    (-> query
+        (r/limit limit))))
+
 (defn- generate-rethinkdb-query
   [inner-query]
   (log/info (format "driver.query-processor/generate-rethinkdb-query: inner-query=%s" inner-query))
   (let [inner-query (update inner-query :aggregation 
                       (partial mbql.u/pre-alias-and-uniquify-aggregations
                                annotate/aggregation-name))]
-    {:query (-> {}
-                (handle-table inner-query))}))
+    (-> {}
+        (handle-table inner-query)
+        (handle-fields inner-query)
+        (handle-limit inner-query))}))
 
 (defn mbql->native
   "Process and run an MBQL query."
