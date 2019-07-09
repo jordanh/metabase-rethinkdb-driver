@@ -1,7 +1,18 @@
 (ns metabase.driver.rethinkdb.util
   (:require [clojure.tools.logging :as log]
             [metabase
-              [util :as u]]))
+              [util :as u]]
+            [metabase.util
+              [i18n :refer [trs]]
+              [ssh :as ssh]]
+            [rethinkdb
+              [core :as rc]
+              [query :as r]]))
+
+(def ^:dynamic ^rethinkdb.core.Connection *rethinkdb-connection*
+  "Connection to a RethinkDB database. Bound by top-level `with-rethinkdb-connection` so it may be reused
+  within its body."
+  nil)
 
 (defn- database->details
   "Make sure DATABASE is in a standard db details format. This is done so we can accept several different types of
@@ -25,3 +36,33 @@
   [maybe-details-or-database]
   (let [details (database->details maybe-details-or-database)]
     (details-to-clj-rethinkdb-params details)))
+
+(defn -with-rethinkdb-connection
+  "Run `f` with a new connection (bound to `*rethinkdb-connection*`) to `database`. Don't use this directly; use
+  `with-rethinkdb-connection`."
+  [f database]
+  (let [details (database->details database)]
+    (ssh/with-ssh-tunnel [details-with-tunnel details]
+      (let [clj-rethinkdb-params (*-to-clj-rethinkdb-params details-with-tunnel)
+           rethinkdb-conn (apply r/connect (mapcat identity clj-rethinkdb-params))]
+       (log/debug (u/format-color 'cyan (trs "Opened new RethinkDB connection.")))
+       (try
+         (binding [*rethinkdb-connection* rethinkdb-conn]
+           (f *rethinkdb-connection*))
+         (finally
+           (rc/close rethinkdb-conn)
+           (log/debug (u/format-color 'cyan (trs "Closed RethinkDB connection.")))))))))
+
+(defmacro with-rethinkdb-connection
+  "Open a new RethinkDB connection to `database-or-details-map`, bind connection to `binding`, execute `body`, and
+  close the connection. The DB connection is re-used by subsequent calls to `with-rethinkdb-connection` within
+  `body`.
+
+   DATABASE-OR-CONNECTION-STRING can also optionally be the connection details map on its own."
+  [[binding database-or-details-map] & body]
+  `(let [f# (fn [~binding]
+              ~@body)]
+     (if *rethinkdb-connection*
+       (f# *rethinkdb-connection*)
+       (-with-rethinkdb-connection f# ~database-or-details-map))))
+    

@@ -1,5 +1,6 @@
 (ns metabase.driver.rethinkdb.query-processor
   (:require [clojure.tools.logging :as log]
+            [metabase.driver.rethinkdb.util :refer [*rethinkdb-connection*]]
             [metabase.mbql
               [util :as mbql.u]]
             [metabase.query-processor
@@ -14,7 +15,7 @@
   (log/info (format "driver.query-processor/handle-table: source-table-id=%s" source-table-id))
   (if-not source-table-id
     query
-    (r/table query (qp.store/table source-table-id))))
+    (r/table query (:name (qp.store/table source-table-id)))))
 
 (defn- handle-fields [query {:keys [fields]}]
   (log/info (format "driver.query-processor/handle-fields: fields=%s" fields))
@@ -44,7 +45,7 @@
     (-> {}
         (handle-table inner-query)
         (handle-fields inner-query)
-        (handle-limit inner-query))}))
+        (handle-limit inner-query))))
 
 (defn mbql->native
   "Process and run an MBQL query."
@@ -52,11 +53,12 @@
     ; (log/info (format "driver.query-processor/mbql->native: query=%s" query))
   (let [native-query (generate-rethinkdb-query (:query query))]
     (log/info (format "driver.query-processor/mbql->native: native-query=%s" native-query))
-    {:query native-query
-     :mbql? true}))
+    native-query))
 
 (defn execute-query
   "Process and run a native RethinkDB query."
-  [{{:keys [mbql? query]} :native}]
-  (log/info (format "driver.query-processor/execute-query: query=%s" query)))
+  [{:keys [native]}]
+  (log/info (format "driver.query-processor/execute-query: native=%s" native))
+  (let [results (r/run native *rethinkdb-connection*)]
+    (log/info (format "driver.query-processor/execute-query: results=%s" results))))
   
