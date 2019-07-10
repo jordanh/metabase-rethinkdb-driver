@@ -149,4 +149,5 @@
 (defmethod driver/execute-query :rethinkdb [_ query]
   (log/info (format "driver/execute-query: query=%s" query))
   (let [results (qp/execute-query query)]
-    (log/info (format "driver/execute-query: results=%s" results))))
+    (log/info (format "driver/execute-query: results=%s" results))
+    results))
