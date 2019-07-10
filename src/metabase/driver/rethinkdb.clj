@@ -8,9 +8,11 @@
             [metabase.driver.common :as driver.common]
             [metabase.db.metadata-queries :as metadata-queries]
             [metabase.driver :as driver]
-            [metabase.query-processor.store :as qp.store]
             [metabase.driver.rethinkdb
-              [util :refer [*-to-clj-rethinkdb-params]]]
+              [query-processor :as qp]
+              [util :refer [with-rethinkdb-connection]]]
+            [metabase.query-processor
+              [store :as qp.store]]
             [schema.core :as s]
             [rethinkdb.query :as r]))
 
@@ -19,22 +21,25 @@
 (defmethod driver/supports? [:rethinkdb :basic-aggregations] [_ _] true)
 (defmethod driver/supports? [:rethinkdb :nested-fields]      [_ _] true)
 
+(defmethod driver/sync-in-context :rethinkdb [_ database do-sync-fn]
+  (with-rethinkdb-connection [_ database]
+    (do-sync-fn)))
+
 (defmethod driver/can-connect? :rethinkdb
   [_ details]
-  (log/info (format "driver/can-connect? details: %s" details))
-  (let [clj-rethinkdb-params (*-to-clj-rethinkdb-params details)]
-    (with-open [conn (apply r/connect (mapcat identity clj-rethinkdb-params))]
-      (-> (r/now) (r/gt 0) (r/run conn)))))
+  (log/info (format "driver/can-connect?: details=%s" details))
+  (with-rethinkdb-connection [conn details]
+    (-> (r/now) (r/gt 0) (r/run conn))))
 
 (defmethod driver/describe-database :rethinkdb
-  [driver database]
-  (let [clj-rethinkdb-params (*-to-clj-rethinkdb-params database)]
-    (with-open [conn (apply r/connect (mapcat identity clj-rethinkdb-params))]
-      {:tables
-        (set
-          (for [table-name (-> (r/table-list) (r/run conn))]
-            {:name table-name
-            :schema nil}))})))
+  [_ database]
+  (log/info (format "driver/describe-database: database=%s" database))
+  (with-rethinkdb-connection [conn database]
+    {:tables
+      (set
+        (for [table-name (-> (r/table-list) (r/run conn))]
+          {:name table-name
+          :schema nil}))}))
 
 (defn- val->special-type [field-value]
   (cond
@@ -125,10 +130,24 @@
                                                                (describe-table-field field (field (:nested-fields field-info)))))))))
 
 (defmethod driver/describe-table :rethinkdb [_ database table]
-  (let [clj-rethinkdb-params (*-to-clj-rethinkdb-params database)]
-    (with-open [conn (apply r/connect (mapcat identity clj-rethinkdb-params))]
-      (let [column-info (table-sample-column-info conn table)]
-        {:schema nil
-         :name   (:name table)
-         :fields (set (for [[field info] column-info]
-                        (describe-table-field field info)))}))))
+  (with-rethinkdb-connection [conn database]
+    (let [column-info (table-sample-column-info conn table)]
+      {:schema nil
+        :name   (:name table)
+        :fields (set (for [[field info] column-info]
+                      (describe-table-field field info)))})))
+
+(defmethod driver/process-query-in-context :rethinkdb [_ qp]
+  (fn [{database-id :database, :as query}]
+    (with-rethinkdb-connection [_ (qp.store/database)]
+      (qp query))))
+
+(defmethod driver/mbql->native :rethinkdb [_ query]
+  (log/info (format "driver/mbql->native: query=%s" query))
+  (qp/mbql->native query))
+
+(defmethod driver/execute-query :rethinkdb [_ query]
+  (log/info (format "driver/execute-query: query=%s" query))
+  (let [results (qp/execute-query query)]
+    (log/info (format "driver/execute-query: results=%s" results))
+    results))
