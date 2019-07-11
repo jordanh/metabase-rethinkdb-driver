@@ -10,6 +10,8 @@
             [metabase.query-processor
               [interface :as i]
               [store :as qp.store]]
+            [metabase.util
+              [date :as du]]
             [metabase.query-processor.middleware.annotate :as annotate]
             [rethinkdb.query :as r])
     (:import metabase.models.field.FieldInstance))
@@ -32,35 +34,43 @@
              (field->name "."))
        fields))
 
+(defmulti ^:private ->lvalue
+  "Return an escaped name that can be used as the name of a given Field."
+  {:arglists '([field])}
+  mbql.u/dispatch-by-clause-name-or-class)
+
+(defmethod ->lvalue         (class Field) [this] (field->name this "."))
+(defmethod ->lvalue         :field-id [[_ field-id]] (->lvalue          (qp.store/field field-id)))
+
 (defmulti ^:private ->rvalue
   "Format this `Field` or value for use as the right hand value of an expression, e.g. by adding `$` to a `Field`'s
   name"
   {:arglists '([x])}
   mbql.u/dispatch-by-clause-name-or-class)
 
-(defmulti ^:private ->lvalue
-  "Return an escaped name that can be used as the name of a given Field."
-  {:arglists '([field])}
-  mbql.u/dispatch-by-clause-name-or-class)
-
-(defmulti ^:private ->initial-rvalue
-  "Return the rvalue that should be used in the *initial* projection for this `Field`."
-  {:arglists '([field])}
-  mbql.u/dispatch-by-clause-name-or-class)
-
-(defmethod ->lvalue         (class Field) [this] (field->name this "."))
-; (defmethod ->initial-rvalue (class Field) [this] (str (field->name this ".")))
-; (defmethod ->rvalue         (class Field) [this] (str (->lvalue this)))
-
-(defmethod ->lvalue         :field-id [[_ field-id]] (->lvalue          (qp.store/field field-id)))
-; (defmethod ->initial-rvalue :field-id [[_ field-id]] (->initial-rvalue  (qp.store/field field-id)))
-; (defmethod ->rvalue         :field-id [[_ field-id]] (->rvalue          (qp.store/field field-id)))
-
 (defmethod ->rvalue nil [_] nil)
-
 (defmethod ->rvalue :value [[_ value _]] value)
 
-;; TODO add support for :absolute-datetime and :relative-datetime
+(defmethod ->rvalue :datetime-field
+  [[_ field]]
+  (->rvalue field))
+
+(defmethod ->rvalue :absolute-datetime
+  [[_ timestamp unit]]
+  (r/iso8601 (du/date->iso-8601 (if-not (= :default unit)
+                             (du/date-trunc unit timestamp)
+                             timestamp))))
+
+; Following Druid driver's lead and treating times exactly like a date
+(defmethod ->rvalue :time
+  [[_ time unit]]
+  (r/iso8601 (du/date->iso-8601 (if-not (= :default unit)
+                             (du/date-trunc unit time)
+                             time))))
+
+(defmethod ->rvalue :relative-datetime
+  [[_ amount unit]]
+  (du/date->iso-8601 (du/date-trunc unit (du/relative-date unit amount))))
 
 ;;; ---------------------------------------- table & field selection -------------------------------------------------
 
