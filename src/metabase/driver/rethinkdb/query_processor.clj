@@ -81,10 +81,6 @@
 
 (defmulti ^:private parse-filter (fn [filter-clause _] (first filter-clause)))
 
-; (defmethod parse-filter :between [[_ field min-val max-val]]
-;   {(->lvalue field) (r/ge query (->rvalue min-val)
-;                      (r/le query (->rvalue max-val)))})
-
 ; (defn- str-match-pattern [options prefix value suffix]
 ;   (if (mbql.u/is-clause? ::not value)
 ;     (r/not (str-match-pattern options prefix (second value) suffix))
@@ -95,15 +91,20 @@
 ; (defmethod parse-filter :starts-with [[_ field v opts]] {(->lvalue field) (str-match-pattern opts \^  v nil)})
 ; (defmethod parse-filter :ends-with   [[_ field v opts]] {(->lvalue field) (str-match-pattern opts nil v \$)})
 
-; (defmethod parse-filter :=  [[_ field value]] {(->lvalue field) (r/eq (->rvalue value))})
-; (defmethod parse-filter :!= [[_ field value]] {(->lvalue field) (r/ne (->rvalue value))})
-; (defmethod parse-filter :<  [[_ field value]] {(->lvalue field) (r/lt (->rvalue value))})
-(defmethod parse-filter :>  [[_ field value] row] (-> (r/get-field row (->lvalue field)) (r/gt (->rvalue value))))
-; (defmethod parse-filter :<= [[_ field value]] {(->lvalue field) (r/le (->rvalue value))})
-; (defmethod parse-filter :>= [[_ field value]] {(->lvalue field) (r/ge (->rvalue value))})
+(defn- eq-filter [f field value row] (-> (r/get-field row (->lvalue field)) (f (->rvalue value))))
 
-; (defmethod parse-filter :and [[_ & args]] (r/and (mapv parse-filter args)))
-; (defmethod parse-filter :or  [[_ & args]] (r/or (mapv parse-filter args)))
+(defmethod parse-filter :between [[_ field min-val max-val] row]
+  (r/and (eq-filter r/ge field min-val row) (eq-filter r/le field max-val row)))
+
+(defmethod parse-filter :=  [[_ field value] row] (eq-filter r/eq field value row))
+(defmethod parse-filter :!= [[_ field value] row] (eq-filter r/ne field value row))
+(defmethod parse-filter :<  [[_ field value] row] (eq-filter r/lt field value row))
+(defmethod parse-filter :>  [[_ field value] row] (eq-filter r/gt field value row))
+(defmethod parse-filter :<= [[_ field value] row] (eq-filter r/le field value row))
+(defmethod parse-filter :>= [[_ field value] row] (eq-filter r/ge field value row))
+
+(defmethod parse-filter :and [[_ & args] row] (apply r/and (mapv #(parse-filter % row) args)))
+(defmethod parse-filter :or  [[_ & args] row] (apply r/or (mapv #(parse-filter % row) args)))
 
 (defn- handle-filter [query {filter-clause :filter}]
   (log/debug (format "driver.query-processor/handle-filter: filter-clause=%s" filter-clause))
