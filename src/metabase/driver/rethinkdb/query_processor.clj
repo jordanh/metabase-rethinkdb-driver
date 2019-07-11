@@ -60,6 +60,8 @@
 
 (defmethod ->rvalue :value [[_ value _]] value)
 
+;; TODO add support for :absolute-datetime and :relative-datetime
+
 ;;; ---------------------------------------- table & field selection -------------------------------------------------
 
 
