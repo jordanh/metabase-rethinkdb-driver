@@ -70,10 +70,16 @@
 
 (defn- handle-fields [query {:keys [fields]}]
   (log/debug (format "driver.query-processor/handle-fields: fields=%s" fields))
-  ;; TODO: this will probably need to be enhanced to fully support nested fields
-  (let [field-names (fields->names fields)]
-    (-> query
-        (r/pluck field-names))))
+  (if-not fields
+    query
+    ;; TODO: this will probably need to be enhanced to fully support nested fields
+    (let [field-names (fields->names fields)]
+      (-> query
+          (r/pluck field-names)))))
+
+;;; ----------------------------------------------------- breakout ---------------------------------------------------
+
+;;; TODO next
 
 ;;; ----------------------------------------------------- filter -----------------------------------------------------
 
@@ -81,15 +87,19 @@
 
 (defmulti ^:private parse-filter (fn [filter-clause _] (first filter-clause)))
 
-; (defn- str-match-pattern [options prefix value suffix]
-;   (if (mbql.u/is-clause? ::not value)
-;     (r/not (str-match-pattern options prefix (second value) suffix))
-;     (let [case-sensitive? (get options :case-sensitive true)]
-;       (re-pattern (str (when-not case-sensitive? "(?i)") prefix (->rvalue value) suffix)))))
-; 
-; (defmethod parse-filter :contains    [[_ field v opts]] {(->lvalue field) (str-match-pattern opts nil v nil)})
-; (defmethod parse-filter :starts-with [[_ field v opts]] {(->lvalue field) (str-match-pattern opts \^  v nil)})
-; (defmethod parse-filter :ends-with   [[_ field v opts]] {(->lvalue field) (str-match-pattern opts nil v \$)})
+(defn- match-filter [field pattern row] (-> (r/get-field row (->lvalue field)) (r/match pattern)))
+
+(defn- str-match-pattern [options prefix value suffix field row]
+  (if (mbql.u/is-clause? ::not value)
+    (r/not (str-match-pattern options prefix (second value) suffix field row))
+    (let [case-sensitive? (get options :case-sensitive true)]
+      (match-filter field
+                    (re-pattern (str (when-not case-sensitive? "(?i)") prefix (->rvalue value) suffix))
+                    row))))
+
+(defmethod parse-filter :contains    [[_ field v opts] row] (str-match-pattern opts nil v nil field row))
+(defmethod parse-filter :starts-with [[_ field v opts] row] (str-match-pattern opts \^  v nil field row))
+(defmethod parse-filter :ends-with   [[_ field v opts] row] (str-match-pattern opts nil v \$ field row))
 
 (defn- eq-filter [f field value row] (-> (r/get-field row (->lvalue field)) (f (->rvalue value))))
 
