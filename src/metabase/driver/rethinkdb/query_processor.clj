@@ -74,11 +74,20 @@
 
 ;;; ---------------------------------------- table & field selection -------------------------------------------------
 
-
 (defn- handle-table [{source-table-id :source-table}]
-  (log/debug (format "driver.query-processor/handle-table: source-table-id=%s" source-table-id))
-  (r/table (:name (qp.store/table source-table-id))))
+  (let [table-name (:name (qp.store/table source-table-id))]
+    (log/debug (format "driver.query-processor/handle-table: table-name=%s" table-name))
+    (r/table table-name)))
 
+(defn- resolve-mbql-field-names
+  "Given an MBQL query, return a vector of the field names to use whether the
+   query is a simple query, a breakout or an aggregation."
+  [query]
+  (let [{:keys [fields breakout]} query]
+    (cond
+      ;; handle aggregation
+      breakout  (fields->names breakout)
+      fields    (fields->names fields))))
 
 (defn- handle-fields [query {:keys [fields]}]
   (log/debug (format "driver.query-processor/handle-fields: fields=%s" fields))
@@ -86,12 +95,21 @@
     query
     ;; TODO: this will probably need to be enhanced to fully support nested fields
     (let [field-names (fields->names fields)]
-      (-> query
-          (r/pluck field-names)))))
+      (r/pluck query field-names))))
 
 ;;; ----------------------------------------------------- breakout ---------------------------------------------------
 
-;;; TODO next
+(defn- handle-breakout [query {concrete-field-vec :breakout}]
+  (log/debug (format "driver.query-processor/handle-breakout: concrete-field-vec=%s" concrete-field-vec))
+  (if-not concrete-field-vec
+    query
+    (let [field-names (fields->names concrete-field-vec)]
+      (-> ;; The MBQL spec implies there can only be one breakout field, but other drivers make it look like a vector
+          ;; of fields can be specified. ReQL allows distinct() to be run on a sequence of objects just as easily
+          ;; so we'll start there.
+          (r/pluck query field-names)
+          ;; TODO: if an index is available, we should probably use it. Not safe to just assume an index name tho...
+          (r/distinct)))))
 
 ;;; ----------------------------------------------------- filter -----------------------------------------------------
 
@@ -140,27 +158,41 @@
   (log/debug (format "driver.query-processor/handle-limit: limit=%d" limit))
   (if-not limit
     query
-    (-> query
-        (r/limit limit))))
+    (r/limit query limit)))
 
-(defn add-results-xformation [query {:keys [fields]}]
-  (log/debug (format "driver.query-processor/handle-results-xformation"))
-  (let [field-names (fields->names fields)]
-    (-> query
-      (r/map (r/fn [row]
-              (r/map field-names (r/fn [col] (r/default (r/get-field row col) nil))))))))
+;;; -------------------------------------------------- order by -----------------------------------------------------
+
+(defn handle-order-by [query {:keys [order-by]}]
+  (log/debug (format "driver.query-processor/handle-order-by: order-by=%s" order-by))
+  (if-not order-by
+    query
+    (let [[[direction field]] order-by]
+    (log/debug (format "driver.query-processor/handle-order-by: direction=%s field=%s" direction field))
+      ;; TODO: this would also be a great place to use an index
+      (r/order-by query
+                  (condp = direction
+                    :asc  (r/asc (->lvalue field))
+                    :desc (r/desc (->lvalue field)))))))
+
+(defn add-results-xformation [query {:keys [fields breakout] :as mbql-query}]
+  (log/debug "driver.query-processor/add-results-xformation")
+  (let [field-names (resolve-mbql-field-names mbql-query)]
+    (r/map query (r/fn [row]
+            (r/map field-names (r/fn [col] (r/default (r/get-field row col) nil)))))))
 
 (defn- generate-rethinkdb-query
-  [inner-query]
-  (log/debug (format "driver.query-processor/generate-rethinkdb-query: inner-query=%s" inner-query))
-  (let [inner-query (update inner-query :aggregation 
+  [mbql-query]
+  (log/debug (format "driver.query-processor/generate-rethinkdb-query: mbql-query=%s" mbql-query))
+  (let [mbql-query (update mbql-query :aggregation 
                       (partial mbql.u/pre-alias-and-uniquify-aggregations
                                annotate/aggregation-name))]
-    (-> (handle-table inner-query)
-        (handle-fields inner-query)
-        (handle-filter inner-query)
-        (handle-limit inner-query)
-        (add-results-xformation inner-query))))
+    (-> (handle-table mbql-query)
+        (handle-fields mbql-query)
+        (handle-breakout mbql-query)
+        (handle-filter mbql-query)
+        (handle-limit mbql-query)
+        (handle-order-by mbql-query)
+        (add-results-xformation mbql-query))))
 
 (defn mbql->native
   "Process and run an MBQL query."
@@ -172,9 +204,9 @@
 
 (defn execute-query
   "Process and run a native RethinkDB query."
-  [{:keys [native query]}]
+  [{native :native mbql-query :query}]
   (log/debug (format "driver.query-processor/execute-query: native=%s" (with-out-str (pprint native))))
-  (let [field-names (fields->names (:fields query))]
+  (let [field-names (resolve-mbql-field-names mbql-query)]
     (try
       (let [rows (r/run native *rethinkdb-connection*)]
         (log/debug (format "driver.query-processor/execute-query: rows=%s" rows))
