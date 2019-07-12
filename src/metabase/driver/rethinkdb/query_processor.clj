@@ -1,5 +1,6 @@
 (ns metabase.driver.rethinkdb.query-processor
 (:require   [clojure
+             [set :as set]
              [string :as str]]
             [clojure.tools.logging :as log]
             [clojure.pprint :refer [pprint]]
@@ -51,6 +52,8 @@
 (defmethod ->rvalue nil [_] nil)
 (defmethod ->rvalue :value [[_ value _]] value)
 
+(defmethod ->rvalue :not [[_ value]] (r/not (->rvalue value)))
+
 (defmethod ->rvalue :datetime-field
   [[_ field]]
   (->rvalue field))
@@ -79,13 +82,21 @@
     (log/debug (format "driver.query-processor/handle-table: table-name=%s" table-name))
     (r/table table-name)))
 
+(defn- aggregation-column-name
+  [[_ [_] column-name]]
+  column-name)
+
 (defn- resolve-mbql-field-names
   "Given an MBQL query, return a vector of the field names to use whether the
-   query is a simple query, a breakout or an aggregation."
+   query is a simple query, a breakout or an aggregation (or a combination)."
   [query]
-  (let [{:keys [fields breakout]} query]
+  (let [{:keys [aggregation fields breakout]} query]
     (cond
-      ;; handle aggregation
+      aggregation (if breakout
+                      (set/union
+                        (fields->names breakout)
+                        (mapv aggregation-column-name aggregation))
+                      (mapv aggregation-column-name aggregation))
       breakout  (fields->names breakout)
       fields    (fields->names fields))))
 
@@ -112,8 +123,6 @@
           (r/distinct)))))
 
 ;;; ----------------------------------------------------- filter -----------------------------------------------------
-
-(defmethod ->rvalue :not [[_ value]] (r/not (->rvalue value)))
 
 (defmulti ^:private parse-filter (fn [filter-clause _] (first filter-clause)))
 
@@ -152,6 +161,42 @@
     query
     (r/filter query (r/fn [row] (parse-filter filter-clause row)))))
 
+;;; ------------------------------------------------- aggregation ---------------------------------------------------
+
+(defmulti ^:private parse-aggregation
+  (fn [[_ [named] _] _ _]
+  (if (coll? named) (first named) named)))
+
+(defn- r-aggregation-array-coersion
+  "Take a single RethinkDB and coerce it to a single element sequence.
+    e.g. { count: 42 } -> [ {count: 42 } ]"
+  [query]  
+  (-> (r/coerce-to query "array")
+      (r/map (r/fn [i] (r/object (r/args i))))))
+
+(defmethod parse-aggregation :count [_ column-name query] 
+  (-> (r/map query (r/fn [_] (r/object column-name 1)))
+      (r/reduce (r/fn [left right]
+                  (r/object
+                    column-name
+                    (r/add
+                      (r/get-field left column-name)
+                      (r/get-field right column-name)))))
+      (r-aggregation-array-coersion)))
+
+(defn- handle-aggregation
+  [query {aggregation-clauses :aggregation}]
+  ;; TODO handle one aggregation clause now, multiple in the future
+  (log/debug (format "driver.query-processor/handle-aggregation: aggregation-clauses=%s" aggregation-clauses))
+  (if-let [aggregation-clause (first aggregation-clauses)]
+    (let [column-name (aggregation-column-name aggregation-clause)]
+      (log/debug
+        (format
+          "driver.query-processor/handle-aggregation: aggregation-clause=%s column-name=%s"
+          aggregation-clause column-name))
+      (parse-aggregation aggregation-clause column-name query))
+    query))
+
 ;;; ----------------------------------------------------- limit -----------------------------------------------------
 
 (defn- handle-limit [query {:keys [limit]}]
@@ -162,6 +207,7 @@
 
 ;;; -------------------------------------------------- order by -----------------------------------------------------
 
+;; TODO: handle multiple order-by clause
 (defn handle-order-by [query {:keys [order-by]}]
   (log/debug (format "driver.query-processor/handle-order-by: order-by=%s" order-by))
   (if-not order-by
@@ -174,30 +220,35 @@
                     :asc  (r/asc (->lvalue field))
                     :desc (r/desc (->lvalue field)))))))
 
+;;; ------------------------------------------- results xformation --------------------------------------------------
+
 (defn add-results-xformation [query {:keys [fields breakout] :as mbql-query}]
-  (log/debug "driver.query-processor/add-results-xformation")
   (let [field-names (resolve-mbql-field-names mbql-query)]
+    (log/debug (format "driver.query-processor/add-results-xformation: field-names=%s" field-names))
     (r/map query (r/fn [row]
             (r/map field-names (r/fn [col] (r/default (r/get-field row col) nil)))))))
 
+;;; ------------------------------------- core query parsing functions ----------------------------------------------
+
 (defn- generate-rethinkdb-query
   [mbql-query]
-  (log/debug (format "driver.query-processor/generate-rethinkdb-query: mbql-query=%s" mbql-query))
   (let [mbql-query (update mbql-query :aggregation 
                       (partial mbql.u/pre-alias-and-uniquify-aggregations
                                annotate/aggregation-name))]
+    (log/debug (format "driver.query-processor/generate-rethinkdb-query: mbql-query=%s" mbql-query))
     (-> (handle-table mbql-query)
         (handle-fields mbql-query)
         (handle-breakout mbql-query)
         (handle-filter mbql-query)
+        (handle-aggregation mbql-query)
         (handle-limit mbql-query)
         (handle-order-by mbql-query)
-        (add-results-xformation mbql-query))))
+        (add-results-xformation mbql-query)
+        )))
 
 (defn mbql->native
   "Process and run an MBQL query."
   [query]
-    ; (log/debug (format "driver.query-processor/mbql->native: query=%s" query))
   (let [native-query (generate-rethinkdb-query (:query query))]
     (log/debug (format "driver.query-processor/mbql->native: native-query=%s" native-query))
     native-query))
@@ -206,7 +257,10 @@
   "Process and run a native RethinkDB query."
   [{native :native mbql-query :query}]
   (log/debug (format "driver.query-processor/execute-query: native=%s" (with-out-str (pprint native))))
-  (let [field-names (resolve-mbql-field-names mbql-query)]
+  (let [mbql-query (update mbql-query :aggregation 
+                      (partial mbql.u/pre-alias-and-uniquify-aggregations
+                               annotate/aggregation-name))
+        field-names (resolve-mbql-field-names mbql-query)]
     (try
       (let [rows (r/run native *rethinkdb-connection*)]
         (log/debug (format "driver.query-processor/execute-query: rows=%s" rows))
