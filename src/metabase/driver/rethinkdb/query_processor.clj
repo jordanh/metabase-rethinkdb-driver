@@ -160,8 +160,22 @@
     query
     (r/limit query limit)))
 
+;;; -------------------------------------------------- order by -----------------------------------------------------
+
+(defn handle-order-by [query {:keys [order-by]}]
+  (log/debug (format "driver.query-processor/handle-order-by: order-by=%s" order-by))
+  (if-not order-by
+    query
+    (let [[[direction field]] order-by]
+    (log/debug (format "driver.query-processor/handle-order-by: direction=%s field=%s" direction field))
+      ;; TODO: this would also be a great place to use an index
+      (r/order-by query
+                  (condp = direction
+                    :asc  (r/asc (->lvalue field))
+                    :desc (r/desc (->lvalue field)))))))
+
 (defn add-results-xformation [query {:keys [fields breakout] :as mbql-query}]
-  (log/debug (format "driver.query-processor/handle-results-xformation"))
+  (log/debug "driver.query-processor/add-results-xformation")
   (let [field-names (resolve-mbql-field-names mbql-query)]
     (r/map query (r/fn [row]
             (r/map field-names (r/fn [col] (r/default (r/get-field row col) nil)))))))
@@ -177,6 +191,7 @@
         (handle-breakout mbql-query)
         (handle-filter mbql-query)
         (handle-limit mbql-query)
+        (handle-order-by mbql-query)
         (add-results-xformation mbql-query))))
 
 (defn mbql->native
