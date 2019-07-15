@@ -110,6 +110,8 @@
 
 ;;; ----------------------------------------------------- breakout ---------------------------------------------------
 
+;; TODO: operate on multiple groups, N.B. our transformation at the end is going to be intense
+;;       I think we should stop doing this on the database server...
 (defn- handle-breakout [query {concrete-field-vec :breakout}]
   (log/debug (format "driver.query-processor/handle-breakout: concrete-field-vec=%s" concrete-field-vec))
   (if-not concrete-field-vec
@@ -167,22 +169,33 @@
   (fn [[_ [named] _] _ _]
   (if (coll? named) (first named) named)))
 
-(defn- r-aggregation-array-coersion
-  "Take a single RethinkDB and coerce it to a single element sequence.
-    e.g. { count: 42 } -> [ {count: 42 } ]"
-  [query]  
-  (-> (r/coerce-to query "array")
+(defn- r-normalize-aggregation-result
+  [query out-column-name]
+  (-> (r/do query (r/fn [n] (r/object out-column-name n)))
+      ; Take a single RethinkDB object and coerce it to a single element sequence.
+      ; e.g. { count: 42 } -> [ {count: 42 } ]
+      (r/coerce-to "array")
       (r/map (r/fn [i] (r/object (r/args i))))))
 
-(defmethod parse-aggregation :count [_ column-name query] 
-  (-> (r/map query (r/fn [_] (r/object column-name 1)))
-      (r/reduce (r/fn [left right]
-                  (r/object
-                    column-name
-                    (r/add
-                      (r/get-field left column-name)
-                      (r/get-field right column-name)))))
-      (r-aggregation-array-coersion)))
+(defmethod parse-aggregation :avg [aggregation-clause out-column-name query] 
+  (let [[_ [_ in-field] _] aggregation-clause
+        in-column-name (->lvalue in-field)]
+    (log/debug (format "driver.query-processor/parse-aggregation: in-column-name=%s" in-column-name))
+    (-> (r/avg query in-column-name)
+        (r-normalize-aggregation-result out-column-name))))
+  
+(defmethod parse-aggregation :count [_ out-column-name query] 
+  (-> (r/count query)
+      (r-normalize-aggregation-result out-column-name)))
+  
+  ; (r/map query (r/fn [_] (r/object column-name 1)))
+  ;     (r/reduce (r/fn [left right]
+  ;                 (r/object
+  ;                   column-name
+  ;                   (r/add
+  ;                     (r/get-field left column-name)
+  ;                     (r/get-field right column-name)))))
+  ;     (r-aggregation-array-coersion)))
 
 (defn- handle-aggregation
   [query {aggregation-clauses :aggregation}]
@@ -221,6 +234,15 @@
                     :desc (r/desc (->lvalue field)))))))
 
 ;;; ------------------------------------------- results xformation --------------------------------------------------
+
+;; TODO support breakouts for real cool like
+; r.db('actionDevelopment').table('Task')
+;           vvvvvv    vvvvvvvvv -- breakouts
+;   .group('status', 'sortOrder')
+;                                                vvvvvvvvvvv -- fields
+;   .map( (row) => r.map(['status', 'sortOrder', 'createdAt'], (col) => row(col)) )
+;   .ungroup()
+;   .concatMap( (row) => row('reduction') )
 
 (defn add-results-xformation [query {:keys [fields breakout] :as mbql-query}]
   (let [field-names (resolve-mbql-field-names mbql-query)]
