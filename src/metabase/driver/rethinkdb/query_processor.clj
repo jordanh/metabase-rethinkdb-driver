@@ -204,6 +204,22 @@
       ; result fields
       [ out-column-name (fn [o] (r/get-field o count-field-name)) ])))
 
+(defmethod parse-aggregation :sum [aggregation-clause idx out-column-name] 
+  (let [[_ [_ in-field] _] aggregation-clause
+        in-column-name (->lvalue in-field)
+        sum-field-name (format "%d_sum" idx)]
+    (vector
+      ; map fields
+      [ sum-field-name 
+        (fn [row] (r/get-field row in-column-name)) ]
+      ; reduce fields
+      [ sum-field-name
+        (fn [left right] (r/add (r/get-field left sum-field-name)
+                                (r/get-field right sum-field-name))) ]
+      ; result fields
+      [ out-column-name
+        (fn [o] (r/get-field o sum-field-name)) ] )))
+
 (defn- collate-parsed-aggregations
   "Take parsed aggregations of the form [[map0 reduce0 result0] [map1 reduce1 result1] ..
   and return [[map0 map1 ..] [reduce0 reduce1 ..]]"
@@ -230,8 +246,6 @@
           (r/args
             (apply_args_to_l_r_fn_pairs reduce-pairs [left right])))))
       (r/do (r/fn [o] (r/make-array o)))
-      ; (r/coerce-to "array")
-      ; (r/map (r/fn [o] (r/object (r/args o))))))
       (r/map (r/fn [o]
         (r/object
           (r/args
