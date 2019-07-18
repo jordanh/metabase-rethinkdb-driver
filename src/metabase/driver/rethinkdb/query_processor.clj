@@ -221,6 +221,30 @@
       [ out-column-name
         (fn [o] (r/count (r/distinct (r/get-field o values-field-name)))) ])))
 
+(defn- simple-aggregation-reduction
+  [aggregation-clause idx out-column-name reduction-f]
+  (let [[_ [_ in-field] _] aggregation-clause
+        in-column-name (->lvalue in-field)
+        values-field-name (format "%d_values" idx)]
+    (vector
+      ; map fields
+      [ values-field-name 
+        (fn [row] (r/get-field row in-column-name)) ]
+      ; reduce fields
+      [ values-field-name
+        (fn [left right] (reduction-f
+                           (r/make-array
+                             (r/get-field left values-field-name)
+                             (r/get-field right values-field-name)))) ]
+      ; result fields
+      [ out-column-name
+        (fn [o] (r/get-field o values-field-name)) ])))
+
+(defmethod parse-aggregation :min [aggregation-clause idx out-column-name]
+  (simple-aggregation-reduction aggregation-clause idx out-column-name r/min))
+    
+(defmethod parse-aggregation :max [aggregation-clause idx out-column-name]
+  (simple-aggregation-reduction aggregation-clause idx out-column-name r/max))
 
 (defmethod parse-aggregation :sum [aggregation-clause idx out-column-name] 
   (let [[_ [_ in-field] _] aggregation-clause
