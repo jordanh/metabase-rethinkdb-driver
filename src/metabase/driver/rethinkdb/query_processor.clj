@@ -92,13 +92,13 @@
   [query]
   (let [{:keys [aggregation fields breakout]} query]
     (cond
-      aggregation (if breakout
-                      (set/union
-                        (fields->names breakout)
-                        (mapv aggregation-column-name aggregation))
-                      (mapv aggregation-column-name aggregation))
-      breakout  (fields->names breakout)
-      fields    (fields->names fields))))
+      (> (count aggregation) 0) (if breakout
+                                  (set/union
+                                    (fields->names breakout)
+                                    (mapv aggregation-column-name aggregation))
+                                    (mapv aggregation-column-name aggregation))
+      breakout                    (fields->names breakout)
+      fields                      (fields->names fields))))
 
 (defn- handle-fields [query {:keys [fields]}]
   (log/debug (format "driver.query-processor/handle-fields: fields=%s" fields))
@@ -169,46 +169,99 @@
   (fn [[_ [named] _] _ _]
   (if (coll? named) (first named) named)))
 
-(defn- r-normalize-aggregation-result
-  [query out-column-name]
-  (-> (r/do query (r/fn [n] (r/object out-column-name n)))
-      ; Take a single RethinkDB object and coerce it to a single element sequence.
-      ; e.g. { count: 42 } -> [ {count: 42 } ]
-      (r/coerce-to "array")
-      (r/map (r/fn [i] (r/object (r/args i))))))
-
-(defmethod parse-aggregation :avg [aggregation-clause out-column-name query] 
+(defmethod parse-aggregation :avg [aggregation-clause idx out-column-name] 
   (let [[_ [_ in-field] _] aggregation-clause
-        in-column-name (->lvalue in-field)]
-    (log/debug (format "driver.query-processor/parse-aggregation: in-column-name=%s" in-column-name))
-    (-> (r/avg query in-column-name)
-        (r-normalize-aggregation-result out-column-name))))
+        in-column-name (->lvalue in-field)
+        sum-field-name (format "%d_sum" idx)
+        count-field-name (format "%d_count" idx)]
+    (vector
+      ; map fields
+      [ sum-field-name 
+        (fn [row] (r/get-field row in-column-name))
+        count-field-name
+        (fn [row] 1) ]
+      ; reduce fields
+      [ sum-field-name
+        (fn [left right] (r/add (r/get-field left sum-field-name)
+                                (r/get-field right sum-field-name)))
+        count-field-name
+        (fn [left right] (r/add (r/get-field left count-field-name)
+                                (r/get-field right count-field-name))) ]
+      ; result fields
+      [ out-column-name
+        (fn [o] (r/div (r/get-field o sum-field-name)
+                       (r/get-field o count-field-name))) ])))
   
-(defmethod parse-aggregation :count [_ out-column-name query] 
-  (-> (r/count query)
-      (r-normalize-aggregation-result out-column-name)))
-  
-  ; (r/map query (r/fn [_] (r/object column-name 1)))
-  ;     (r/reduce (r/fn [left right]
-  ;                 (r/object
-  ;                   column-name
-  ;                   (r/add
-  ;                     (r/get-field left column-name)
-  ;                     (r/get-field right column-name)))))
-  ;     (r-aggregation-array-coersion)))
+(defmethod parse-aggregation :count [_ idx out-column-name] 
+  (let [count-field-name (format "%d_count" idx)]
+    (vector
+      ; map fields
+      [ count-field-name (fn [row] 1) ]
+      ; reduce fields
+      [ count-field-name
+        (fn [left right] (r/add (r/get-field left count-field-name)
+                                (r/get-field right count-field-name))) ]
+      ; result fields
+      [ out-column-name (fn [o] (r/get-field o count-field-name)) ])))
+
+(defn- collate-parsed-aggregations
+  "Take parsed aggregations of the form [[map0 reduce0 result0] [map1 reduce1 result1] ..
+  and return [[map0 map1 ..] [reduce0 reduce1 ..]]"
+  [parsed-aggregations]
+  (for [i (range 3)] (map #(nth % i) parsed-aggregations)))
+
+(defn- apply_args_to_l_r_fn_pairs
+  "Take [l0 r_fn0 l1 r_fn1 ..] and transform it to the sequence (l0 r0 l1 r1 ..) by
+   evaluating the sequence pairwise and calling r_fn1 with args."
+   [lr_fn_pairs args]
+   (loop [[l r_fn & rest] (flatten lr_fn_pairs) result []]
+     (if-not l 
+       result
+       (recur rest (concat result [l (apply r_fn args)])))))
+
+(defn- make-aggregation-query-pipeline
+  [[map-pairs reduce-pairs result-pairs] query]
+  (-> (r/map query (r/fn [row] 
+        (r/object
+          (r/args
+            (apply_args_to_l_r_fn_pairs map-pairs [row])))))
+      (r/reduce (r/fn [left right]
+        (r/object
+          (r/args
+            (apply_args_to_l_r_fn_pairs reduce-pairs [left right])))))
+      (r/do (r/fn [o] (r/make-array o)))
+      ; (r/coerce-to "array")
+      ; (r/map (r/fn [o] (r/object (r/args o))))))
+      (r/map (r/fn [o]
+        (r/object
+          (r/args
+            (apply_args_to_l_r_fn_pairs result-pairs [o])))))))
+
+(defn- make-aggregation-pipeline-params
+  [aggregations]
+  (loop [[ag & next-ags] aggregations idx 0 result '()]
+    (if-not ag
+      (collate-parsed-aggregations result)
+      (let [out-column-name (aggregation-column-name ag)
+            parsed-aggregation (parse-aggregation ag idx out-column-name)]
+        (log/debug
+          (format
+            "driver.query-processor/make-aggregation-pipeline-params: aggregation-clause=%s out-column-name=%s parsed-aggregation=%s"
+            ag out-column-name parsed-aggregation))
+        (recur next-ags (inc idx) (cons parsed-aggregation result))))))
 
 (defn- handle-aggregation
-  [query {aggregation-clauses :aggregation}]
-  ;; TODO handle one aggregation clause now, multiple in the future
-  (log/debug (format "driver.query-processor/handle-aggregation: aggregation-clauses=%s" aggregation-clauses))
-  (if-let [aggregation-clause (first aggregation-clauses)]
-    (let [column-name (aggregation-column-name aggregation-clause)]
+  [query {aggregations :aggregation}]
+  (log/debug (format "driver.query-processor/handle-aggregation: aggregations=%s" aggregations))
+  (if-not (> (count aggregations) 0)
+    query
+    (let [return-query (-> (make-aggregation-pipeline-params aggregations)
+                           (make-aggregation-query-pipeline query))]
       (log/debug
         (format
-          "driver.query-processor/handle-aggregation: aggregation-clause=%s column-name=%s"
-          aggregation-clause column-name))
-      (parse-aggregation aggregation-clause column-name query))
-    query))
+          "driver.query-processor/handle-aggregation: returning=%s"
+          return-query))
+          return-query)))
 
 ;;; ----------------------------------------------------- limit -----------------------------------------------------
 
