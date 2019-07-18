@@ -204,6 +204,24 @@
       ; result fields
       [ out-column-name (fn [o] (r/get-field o count-field-name)) ])))
 
+(defmethod parse-aggregation :distinct [aggregation-clause idx out-column-name] 
+  (let [[_ [_ in-field] _] aggregation-clause
+        in-column-name (->lvalue in-field)
+        values-field-name (format "%d_values" idx)]
+    (vector
+      ; map fields
+      [ values-field-name 
+        (fn [row] (r/make-array (r/get-field row in-column-name))) ]
+      ; reduce fields
+      [ values-field-name
+        (fn [left right] (r/append
+                           (r/get-field left values-field-name)
+                           (r/nth (r/get-field right values-field-name) 0))) ]
+      ; result fields
+      [ out-column-name
+        (fn [o] (r/count (r/distinct (r/get-field o values-field-name)))) ])))
+
+
 (defmethod parse-aggregation :sum [aggregation-clause idx out-column-name] 
   (let [[_ [_ in-field] _] aggregation-clause
         in-column-name (->lvalue in-field)
