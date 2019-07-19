@@ -4,7 +4,8 @@
              [string :as str]]
             [clojure.tools.logging :as log]
             [clojure.pprint :refer [pprint]]
-            [metabase.driver.rethinkdb.util :refer [*rethinkdb-connection*]]
+            [metabase.driver.rethinkdb.util
+              :refer [*rethinkdb-connection* apply_args_to_l_r_fn_pairs]]
             [metabase.mbql
               [util :as mbql.u]]
             [metabase.models.field :refer [Field]]
@@ -110,19 +111,44 @@
 
 ;;; ----------------------------------------------------- breakout ---------------------------------------------------
 
-;; TODO: operate on multiple groups, N.B. our transformation at the end is going to be intense
-;;       I think we should stop doing this on the database server...
-(defn- handle-breakout [query {concrete-field-vec :breakout}]
-  (log/debug (format "driver.query-processor/handle-breakout: concrete-field-vec=%s" concrete-field-vec))
-  (if-not concrete-field-vec
+(defn- handle-breakout-grouping [query {:keys [breakout fields]}]
+  (if-not breakout
     query
-    (let [field-names (fields->names concrete-field-vec)]
-      (-> ;; The MBQL spec implies there can only be one breakout field, but other drivers make it look like a vector
-          ;; of fields can be specified. ReQL allows distinct() to be run on a sequence of objects just as easily
-          ;; so we'll start there.
-          (r/pluck query field-names)
-          ;; TODO: if an index is available, we should probably use it. Not safe to just assume an index name tho...
-          (r/distinct)))))
+    (let [breakout-fields (fields->names breakout)
+          plucked-fields (set/union breakout-fields (fields->names fields))]
+      (log/debug
+        (format
+          "driver.query-processor/handle-breakout-grouping: breakout-fields=%s plucked-field=%s"
+            breakout-fields plucked-fields))
+      (r/group query breakout-fields))))
+
+(defn- breakout-fields->kv-pairs
+  [breakout-fields]
+  (if (= (count breakout-fields) 1)
+    ;; "group" field will be string
+    (cons (first breakout-fields) [(fn [row] (r/get-field row "group"))])
+    ;; "group" field will be sequence
+    (loop [[field & rest] breakout-fields idx 0 result '()]
+      (if-not field
+        result
+        (recur rest (inc idx)
+          (concat result [field]
+            [(fn [row] (r/nth (r/get-field row "group") idx))]))))))
+
+(defn- handle-breakout-ungrouping [query {:keys [breakout]}]
+  (if-not breakout
+    query
+    (let [breakout-fields (fields->names breakout) 
+          breakout-obj-kvs (breakout-fields->kv-pairs breakout-fields)]
+      (log/debug
+        (format
+          "driver.query-processor/handle-breakout-ungrouping: breakout-fields=%s breakout-obj-kvs=%s"
+            breakout-fields (seq breakout-obj-kvs)))
+      (-> (r/ungroup query)
+          (r/concat-map (r/fn [row]
+            (-> (r/get-field row "reduction")
+                (r/merge (r/object
+                  (r/args (apply_args_to_l_r_fn_pairs breakout-obj-kvs [row])))))))))))
 
 ;;; ----------------------------------------------------- filter -----------------------------------------------------
 
@@ -268,15 +294,6 @@
   [parsed-aggregations]
   (for [i (range 3)] (map #(nth % i) parsed-aggregations)))
 
-(defn- apply_args_to_l_r_fn_pairs
-  "Take [l0 r_fn0 l1 r_fn1 ..] and transform it to the sequence (l0 r0 l1 r1 ..) by
-   evaluating the sequence pairwise and calling r_fn1 with args."
-   [lr_fn_pairs args]
-   (loop [[l r_fn & rest] (flatten lr_fn_pairs) result []]
-     (if-not l 
-       result
-       (recur rest (concat result [l (apply r_fn args)])))))
-
 (defn- make-aggregation-query-pipeline
   [[map-pairs reduce-pairs result-pairs] query]
   (-> (r/map query (r/fn [row] 
@@ -308,7 +325,7 @@
 
 (defn- handle-aggregation
   [query {aggregations :aggregation}]
-  (log/debug (format "driver.query-processor/handle-aggregation: aggregations=%s" aggregations))
+  (log/debug (format "driver.query-processor/handle-aggregation: aggregations=%s" (seq aggregations)))
   (if-not (> (count aggregations) 0)
     query
     (let [return-query (-> (make-aggregation-pipeline-params aggregations)
@@ -344,15 +361,6 @@
 
 ;;; ------------------------------------------- results xformation --------------------------------------------------
 
-;; TODO support breakouts for real cool like
-; r.db('actionDevelopment').table('Task')
-;           vvvvvv    vvvvvvvvv -- breakouts
-;   .group('status', 'sortOrder')
-;                                                vvvvvvvvvvv -- fields
-;   .map( (row) => r.map(['status', 'sortOrder', 'createdAt'], (col) => row(col)) )
-;   .ungroup()
-;   .concatMap( (row) => row('reduction') )
-
 (defn add-results-xformation [query {:keys [fields breakout] :as mbql-query}]
   (let [field-names (resolve-mbql-field-names mbql-query)]
     (log/debug (format "driver.query-processor/add-results-xformation: field-names=%s" field-names))
@@ -369,9 +377,10 @@
     (log/debug (format "driver.query-processor/generate-rethinkdb-query: mbql-query=%s" mbql-query))
     (-> (handle-table mbql-query)
         (handle-fields mbql-query)
-        (handle-breakout mbql-query)
+        (handle-breakout-grouping mbql-query)
         (handle-filter mbql-query)
         (handle-aggregation mbql-query)
+        (handle-breakout-ungrouping mbql-query)
         (handle-limit mbql-query)
         (handle-order-by mbql-query)
         (add-results-xformation mbql-query)

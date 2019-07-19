@@ -14,6 +14,15 @@
   within its body."
   nil)
 
+(defn apply_args_to_l_r_fn_pairs
+  "Take [l0 r_fn0 l1 r_fn1 ..] and transform it to the sequence (l0 r0 l1 r1 ..) by
+   evaluating the sequence pairwise and calling r_fn1 with args."
+   [lr_fn_pairs args]
+   (loop [[l r_fn & rest] (flatten lr_fn_pairs) result []]
+     (if-not l 
+       result
+       (recur rest (concat result [l (apply r_fn args)])))))
+
 (defn- database->details
   "Make sure DATABASE is in a standard db details format. This is done so we can accept several different types of
    values for DATABASE, such as plain strings or the usual MB details map."
