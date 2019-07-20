@@ -22,6 +22,9 @@
 
 ;;; ---------------------------------------- field mapping -----------------------------------------------------------
 
+;; this pattern brought to you by the mongodb driver...I'm not a big fan
+(def ^:dynamic ^:private *query* nil)
+
 (defn- field->name
   "Return a single string name for FIELD. For nested fields, this creates a combined qualified name."
   ^String [^FieldInstance field, ^String separator]
@@ -37,16 +40,22 @@
        fields))
 
 (defmulti ^:private ->lvalue
-  "Return an escaped name that can be used as the name of a given Field."
+  "Return a name that can be used as the name of a given field."
   {:arglists '([field])}
   mbql.u/dispatch-by-clause-name-or-class)
 
-(defmethod ->lvalue         (class Field) [this] (field->name this "."))
-(defmethod ->lvalue         :field-id [[_ field-id]] (->lvalue          (qp.store/field field-id)))
+(defmethod ->lvalue (class Field) [this] (field->name this "."))
+
+;; see metabase mongodb driver source
+(defmethod ->lvalue :aggregation [[_ index]]
+  (log/debug (format "driver.query-processor/->lvalue :aggregation: index=%s" index))
+  (annotate/aggregation-name (mbql.u/aggregation-at-index *query* index)))
+
+(defmethod ->lvalue :field-id [[_ field-id]] (->lvalue (qp.store/field field-id)))
+(defmethod ->lvalue :datetime-field [[_ field-clause _]] (->lvalue field-clause))
 
 (defmulti ^:private ->rvalue
-  "Format this `Field` or value for use as the right hand value of an expression, e.g. by adding `$` to a `Field`'s
-  name"
+  "Format this field or value for use as the right hand value of an expression"
   {:arglists '([x])}
   mbql.u/dispatch-by-clause-name-or-class)
 
@@ -55,9 +64,7 @@
 
 (defmethod ->rvalue :not [[_ value]] (r/not (->rvalue value)))
 
-(defmethod ->rvalue :datetime-field
-  [[_ field]]
-  (->rvalue field))
+(defmethod ->rvalue :datetime-field [[_ field]] (->rvalue field))
 
 (defmethod ->rvalue :absolute-datetime
   [[_ timestamp unit]]
@@ -215,20 +222,22 @@
                                 (r/get-field right count-field-name))) ]
       ; result fields
       [ out-column-name
-        (fn [o] (r/div (r/get-field o sum-field-name)
-                       (r/get-field o count-field-name))) ])))
+        (fn [o] (r/default (r/div (r/get-field o sum-field-name)
+                                  (r/get-field o count-field-name)) nil)) ])))
   
 (defmethod parse-aggregation :count [_ idx out-column-name] 
   (let [count-field-name (format "%d_count" idx)]
     (vector
       ; map fields
-      [ count-field-name (fn [row] 1) ]
+      [ count-field-name
+        (fn [row] 1) ]
       ; reduce fields
       [ count-field-name
         (fn [left right] (r/add (r/get-field left count-field-name)
                                 (r/get-field right count-field-name))) ]
       ; result fields
-      [ out-column-name (fn [o] (r/get-field o count-field-name)) ])))
+      [ out-column-name
+        (fn [o] (r/default (r/get-field o count-field-name) 0)) ])))
 
 (defmethod parse-aggregation :distinct [aggregation-clause idx out-column-name] 
   (let [[_ [_ in-field] _] aggregation-clause
@@ -245,7 +254,9 @@
                            (r/nth (r/get-field right values-field-name) 0))) ]
       ; result fields
       [ out-column-name
-        (fn [o] (r/count (r/distinct (r/get-field o values-field-name)))) ])))
+        (fn [o] (r/default 
+                  (r/count (r/distinct
+                             (r/get-field o values-field-name))) nil)) ])))
 
 (defn- simple-aggregation-reduction
   [aggregation-clause idx out-column-name reduction-f]
@@ -264,7 +275,7 @@
                              (r/get-field right values-field-name)))) ]
       ; result fields
       [ out-column-name
-        (fn [o] (r/get-field o values-field-name)) ])))
+        (fn [o] (r/default (r/get-field o values-field-name) nil)) ])))
 
 (defmethod parse-aggregation :min [aggregation-clause idx out-column-name]
   (simple-aggregation-reduction aggregation-clause idx out-column-name r/min))
@@ -286,7 +297,7 @@
                                 (r/get-field right sum-field-name))) ]
       ; result fields
       [ out-column-name
-        (fn [o] (r/get-field o sum-field-name)) ] )))
+        (fn [o] (r/default (r/get-field o sum-field-name) nil)) ] )))
 
 (defn- collate-parsed-aggregations
   "Take parsed aggregations of the form [[map0 reduce0 result0] [map1 reduce1 result1] ..
@@ -300,10 +311,11 @@
         (r/object
           (r/args
             (apply_args_to_l_r_fn_pairs map-pairs [row])))))
-      (r/reduce (r/fn [left right]
-        (r/object
-          (r/args
-            (apply_args_to_l_r_fn_pairs reduce-pairs [left right])))))
+      (-> (r/reduce (r/fn [left right]
+            (r/object
+              (r/args
+                (apply_args_to_l_r_fn_pairs reduce-pairs [left right])))))
+          (r/default (r/object)))
       (r/do (r/fn [o] (r/make-array o)))
       (r/map (r/fn [o]
         (r/object
@@ -346,18 +358,16 @@
 
 ;;; -------------------------------------------------- order by -----------------------------------------------------
 
-;; TODO: handle multiple order-by clause
+(defmulti ^:private parse-order-by first)
+
+(defmethod parse-order-by :asc  [[direction field]] (r/asc (->lvalue field)))
+(defmethod parse-order-by :desc [[direction field]] (r/desc (->lvalue field)))
+
 (defn handle-order-by [query {:keys [order-by]}]
   (log/debug (format "driver.query-processor/handle-order-by: order-by=%s" order-by))
   (if-not order-by
     query
-    (let [[[direction field]] order-by]
-    (log/debug (format "driver.query-processor/handle-order-by: direction=%s field=%s" direction field))
-      ;; TODO: this would also be a great place to use an index
-      (r/order-by query
-                  (condp = direction
-                    :asc  (r/asc (->lvalue field))
-                    :desc (r/desc (->lvalue field)))))))
+    (r/order-by query (mapv parse-order-by order-by))))
 
 ;;; ------------------------------------------- results xformation --------------------------------------------------
 
@@ -383,15 +393,15 @@
         (handle-breakout-ungrouping mbql-query)
         (handle-limit mbql-query)
         (handle-order-by mbql-query)
-        (add-results-xformation mbql-query)
-        )))
+        (add-results-xformation mbql-query))))
 
 (defn mbql->native
   "Process and run an MBQL query."
   [query]
-  (let [native-query (generate-rethinkdb-query (:query query))]
-    (log/debug (format "driver.query-processor/mbql->native: native-query=%s" native-query))
-    native-query))
+  (binding [*query* query]
+    (let [native-query (generate-rethinkdb-query (:query query))]
+        (log/debug (format "driver.query-processor/mbql->native: native-query=%s" native-query))
+        native-query)))
 
 (defn execute-query
   "Process and run a native RethinkDB query."
